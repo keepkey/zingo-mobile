@@ -1,13 +1,13 @@
 name: Validate Upstream-Ready
 
 # Ensures feature branches do not contain fork-only files that must never
-# appear in upstream PRs. Feature branches must be created from upstream/main
-# (zingolabs/zingo-mobile:main), not from this fork's main.
+# appear in upstream PRs. Feature branches must be created from upstream/dev
+# (zingolabs/zingo-mobile:dev), not from this fork's dev.
 # See docs/contributing.md for the correct branching strategy.
 
 on:
   pull_request:
-    branches: [main]
+    branches: [dev]
 
 jobs:
   check-no-fork-only-files:
@@ -27,7 +27,7 @@ jobs:
             ".github/proto-hashes.sha256"
           )
 
-          CHANGED=$(git diff --name-only origin/main...HEAD)
+          CHANGED=$(git diff --name-only origin/dev...HEAD)
           FOUND=false
 
           for f in "${FORK_ONLY[@]}"; do
@@ -39,12 +39,12 @@ jobs:
 
           if [ "$FOUND" = "true" ]; then
             echo ""
-            echo "Feature branches must be created from upstream/main, not this fork's main."
-            echo "These files live only on the fork's main branch and must never reach upstream."
+            echo "Feature branches must be created from upstream/dev, not this fork's dev."
+            echo "These files live only on the fork's dev branch and must never reach upstream."
             echo ""
-            echo "Fix: recreate the branch from upstream/main and cherry-pick your commits."
+            echo "Fix: recreate the branch from upstream/dev and cherry-pick your commits."
             echo "  git fetch upstream"
-            echo "  git checkout -b <branch-name> upstream/main"
+            echo "  git checkout -b <branch-name> upstream/dev"
             echo "  git cherry-pick <your-commits>"
             echo ""
             echo "See docs/contributing.md for full guidance."
