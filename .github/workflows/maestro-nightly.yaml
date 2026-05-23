@@ -197,8 +197,25 @@ jobs:
 
       - name: Boot iOS simulator
         run: |
-          xcrun simctl boot "iPhone 16" || true
-          xcrun simctl bootstatus "iPhone 16" -b
+          # Target iOS 18.5 explicitly — the default "iPhone 16" on this runner
+          # is iOS 26.x which Maestro 2.6.0's pre-built XCTest runner doesn't support.
+          UDID=$(xcrun simctl list devices --json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for rt, devs in data['devices'].items():
+    if '18-5' in rt or 'iOS 18.5' in rt:
+        for d in devs:
+            if d['name'] == 'iPhone 16' and d.get('isAvailable', False):
+                print(d['udid']); sys.exit(0)
+" 2>/dev/null || true)
+          if [ -z "${UDID}" ]; then
+            echo "No pre-existing iPhone 16 (iOS 18.5) found — creating one"
+            UDID=$(xcrun simctl create "iPhone 16" "iPhone 16" "iOS 18.5")
+          fi
+          echo "Target simulator UDID: ${UDID}"
+          echo "SIM_UDID=${UDID}" >> "$GITHUB_ENV"
+          xcrun simctl boot "${UDID}" || true
+          xcrun simctl bootstatus "${UDID}" -b
           open -a Simulator
 
       - name: Install Maestro CLI
@@ -208,13 +225,11 @@ jobs:
 
       - name: Install app on simulator
         run: |
-          xcrun simctl install booted \
+          xcrun simctl install "${SIM_UDID}" \
             ios/build/DerivedData/Build/Products/Release-iphonesimulator/Zingo.app
 
       - name: Run Maestro tests
-        env:
-          MAESTRO_DRIVER_STARTUP_TIMEOUT: 240
-        run: maestro test .maestro/
+        run: maestro --device "${SIM_UDID}" test .maestro/
 
       - name: Upload Maestro report on failure
         if: failure()
