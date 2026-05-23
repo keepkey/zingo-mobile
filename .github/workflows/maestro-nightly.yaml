@@ -199,6 +199,7 @@ jobs:
         run: |
           xcrun simctl boot "iPhone 16" || true
           xcrun simctl bootstatus "iPhone 16" -b
+          open -a Simulator
 
       - name: Install Maestro CLI
         run: |
@@ -211,6 +212,8 @@ jobs:
             ios/build/DerivedData/Build/Products/Release-iphonesimulator/Zingo.app
 
       - name: Run Maestro tests
+        env:
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: 240
         run: maestro test .maestro/
 
       - name: Upload Maestro report on failure
