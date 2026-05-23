@@ -1,4 +1,4 @@
-name: Maestro Cloud E2E (Nightly)
+name: Maestro E2E (Nightly)
 
 on:
   schedule:
@@ -14,7 +14,9 @@ jobs:
     needs: create-cache-key
     with:
       cache-key: ${{ needs.create-cache-key.outputs.cache-key }}
-      arch: arm64-v8a
+      # x86_64 so the artifact runs on GitHub Actions' Linux Android emulator
+      # (the Linux runners are x86_64; an arm64-v8a APK would not install).
+      arch: x86_64
 
   ios-build:
     strategy:
@@ -24,12 +26,12 @@ jobs:
     with:
       cache-key: ${{ needs.create-cache-key.outputs.cache-key }}
 
-  maestro-cloud-android:
-    name: Maestro Cloud — Android
+  maestro-android:
+    name: Maestro — Android
     runs-on: ubuntu-24.04
     needs: [create-cache-key, android-build]
     env:
-      ABI: arm64-v8a
+      ABI: x86_64
       CACHE-KEY: ${{ needs.create-cache-key.outputs.cache-key }}
 
     steps:
@@ -75,15 +77,48 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease -PsplitApk=true
 
-      - name: Run Maestro Cloud
-        uses: mobile-dev-inc/action-maestro-cloud@v3.0.0
-        with:
-          api-key: ${{ secrets.MAESTRO_CLOUD_API_KEY }}
-          project-id: ${{ secrets.MAESTRO_CLOUD_PROJECT_ID }}
-          app-file: android/app/build/outputs/apk/release/app-arm64-v8a-release.apk
+      - name: Install Maestro CLI
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> $GITHUB_PATH
 
-  maestro-cloud-ios:
-    name: Maestro Cloud — iOS
+      - name: Enable KVM (Linux Android emulator acceleration)
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run Maestro tests on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 33
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          script: |
+            adb install -r android/app/build/outputs/apk/release/app-x86_64-release.apk
+            adb logcat -c
+            adb logcat > /tmp/maestro-logcat.log 2>&1 &
+            LOGCAT_PID=$!
+            set +e
+            maestro test .maestro/
+            EXIT=$?
+            kill $LOGCAT_PID 2>/dev/null || true
+            exit $EXIT
+
+      - name: Upload Maestro report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-android-report
+          path: |
+            ~/.maestro/tests/**
+            /tmp/maestro-logcat.log
+
+  maestro-ios:
+    name: Maestro — iOS
     runs-on: macos-15
     needs: [create-cache-key, ios-build]
     env:
@@ -98,7 +133,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Native rust cache
+      - name: Native iOS xcframework cache
         uses: actions/cache/restore@v5
         with:
           path: rust/lib/Generated
@@ -129,6 +164,20 @@ jobs:
           retry_wait_seconds: 15
           command: cd ios && pod install
 
+      - name: Download Hermes dSYMs
+        working-directory: ios
+        run: |
+          RN_VERSION=$(node -p "require('../package.json').dependencies['react-native'].replace(/[^0-9.]/g, '')")
+          DSYM_BASE="vendor/hermes-dsyms/RN-${RN_VERSION}/ios-arm64/release"
+          DSYM_CHECK="${DSYM_BASE}/iphoneos/hermes.framework.dSYM"
+          if [ ! -d "${DSYM_CHECK}" ]; then
+            echo "Downloading Hermes dSYMs for React Native ${RN_VERSION}..."
+            mkdir -p "${DSYM_BASE}"
+            curl -fL "https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/${RN_VERSION}/react-native-artifacts-${RN_VERSION}-hermes-framework-dSYM-release.tar.gz" | tar -xz -C "${DSYM_BASE}"
+          else
+            echo "Hermes dSYMs already present."
+          fi
+
       - name: Inspect Hermes dSYM tree
         run: find ios/vendor/hermes-dsyms -maxdepth 6 2>/dev/null || echo "ios/vendor/hermes-dsyms not found"
 
@@ -146,14 +195,45 @@ jobs:
             -derivedDataPath "build/DerivedData" \
             -quiet
 
-      - name: Zip app for Maestro Cloud
+      - name: Boot iOS simulator
         run: |
-          cd ios/build/DerivedData/Build/Products/Release-iphonesimulator
-          zip -r Zingo.app.zip Zingo.app
+          # Target iOS 18.5 explicitly — the default "iPhone 16" on this runner
+          # is iOS 26.x which Maestro 2.6.0's pre-built XCTest runner doesn't support.
+          UDID=$(xcrun simctl list devices --json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for rt, devs in data['devices'].items():
+    if '18-5' in rt or 'iOS 18.5' in rt:
+        for d in devs:
+            if d['name'] == 'iPhone 16' and d.get('isAvailable', False):
+                print(d['udid']); sys.exit(0)
+" 2>/dev/null || true)
+          if [ -z "${UDID}" ]; then
+            echo "No pre-existing iPhone 16 (iOS 18.5) found — creating one"
+            UDID=$(xcrun simctl create "iPhone 16" "iPhone 16" "iOS 18.5")
+          fi
+          echo "Target simulator UDID: ${UDID}"
+          echo "SIM_UDID=${UDID}" >> "$GITHUB_ENV"
+          xcrun simctl boot "${UDID}" || true
+          xcrun simctl bootstatus "${UDID}" -b
+          open -a Simulator
 
-      - name: Run Maestro Cloud
-        uses: mobile-dev-inc/action-maestro-cloud@v3.0.0
+      - name: Install Maestro CLI
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> $GITHUB_PATH
+
+      - name: Install app on simulator
+        run: |
+          xcrun simctl install "${SIM_UDID}" \
+            ios/build/DerivedData/Build/Products/Release-iphonesimulator/Zingo.app
+
+      - name: Run Maestro tests
+        run: maestro --device "${SIM_UDID}" test .maestro/
+
+      - name: Upload Maestro report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          api-key: ${{ secrets.MAESTRO_CLOUD_API_KEY }}
-          project-id: ${{ secrets.MAESTRO_CLOUD_PROJECT_ID }}
-          app-file: ios/build/DerivedData/Build/Products/Release-iphonesimulator/Zingo.app.zip
+          name: maestro-ios-report
+          path: ~/.maestro/tests/**
