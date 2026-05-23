@@ -1,0 +1,5 @@
+flows:
+  - 03_basic_settings.yaml
+  - 04_basic_address_book.yaml
+  - 01_basic_new_wallet.yaml
+  - 02_basic_drawer_menu.yaml
